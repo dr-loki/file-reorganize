@@ -1,0 +1,51 @@
+source_root: /path/to/source
+output_root: /path/to/output
+mode: analyze
+ollama_url: http://localhost:11434
+model: llama3.2:3b
+timeout_seconds: 45
+workers_extract: 12
+workers_llm: 2
+dry_run: true
+include_dates: true
+max_file_name_words: 2
+max_folder_name_words: 3
+max_filename_length: 80
+max_folder_depth: 4
+ocr_enabled: false
+ocr_on_scanned_pdfs: true
+controlled_taxonomy: true
+taxonomy:
+  - finance/invoices
+  - finance/statements
+  - finance/taxes
+  - legal/contracts
+  - legal/corporate
+  - medical/records
+  - personal/identity
+  - personal/correspondence
+  - research/technical
+  - research/business
+  - research/religious
+  - projects/active
+  - projects/archive
+  - media/photos
+  - media/scans
+  - unclear/needs_review
+min_confidence: 0.65
+folder_rename_enabled: false
+folder_rename_min_confidence: 0.75
+supported_extensions:
+  - .pdf
+  - .docx
+  - .txt
+  - .md
+  - .csv
+exclude_paths: []
+exclude_extensions: []
+review_bucket: unclear/needs_review
+skip_duplicates: true
+detect_duplicates: true
+skip_existing_in_output: true
+state_file: /path/to/source/.organizer_state.json
+manifest_dir: /path/to/source/.organizer_manifests
