@@ -5,10 +5,16 @@ Disk ReOrganizer is a Python 3.11+ local file organizer that extracts content, a
 ## What This Refactor Added
 
 - Lightweight terminal progress reporting with clear phases.
-- Semantic topic folders based on file content, not broad taxonomy folders.
-- Minimum topic size of 3 files for dedicated folders.
-- Small topics routed into `misc_topics`.
-- Topic planning completed before any file operation starts.
+- Hierarchical parent/subtopic planning with corpus-wide normalization.
+- Minimum topic and subtopic size thresholds (default 3).
+- Small/weak topics routed into `misc_topics`.
+- Low-confidence files preserve original filenames.
+- Staged classification: fast pass first, heavy LLM only when needed.
+- Content-hash classification cache + concept cache with prompt/schema versioning.
+- Keep-alive support for Ollama model reuse.
+- Full folder audit (`normalize`, `semantic_rename`, `preserve_with_reason`, `trash_if_empty`).
+- Empty-folder garbage collection into `.trash_empty_dirs`.
+- Incremental rename trace output (`rename_trace.csv` or dry-run preview).
 - Early dependency checks, including GUI `tkinter` detection.
 - A `doctor` command for quick environment validation.
 
@@ -94,7 +100,10 @@ Progress is shown in these phases:
 - `extracting`
 - `classifying`
 - `topic_clustering`
+- `topic_normalization`
 - `planning`
+- `folder_audit`
+- `garbage_collect`
 - `mkdir`
 - `renaming`
 - `moving`
@@ -117,15 +126,16 @@ python -m organizer analyze --progress detailed --progress-refresh-ms 250
 
 ## Semantic Topic Planning
 
-The organizer now groups files by inferred semantic topic.
+The organizer now performs corpus-wide hierarchical planning before any move/rename.
 
 Rules:
 
-- each file gets a semantic topic label from the classifier
-- topic folders are created only for topics with at least 3 files
-- smaller topics go into `misc_topics`
-- files routed to `misc_topics` keep the topic in the filename
-- the full topic plan is computed and written before moves or copies begin
+- each file is classified with `parent_topic`, optional `subtopic`, confidence, and rename policy
+- parent topics are normalized across variants before planning
+- parent/subtopic folders are created only when thresholds are met
+- weak subtopics collapse into parent; weak parents collapse into `misc_topics`
+- low-confidence files keep original filename stems
+- full topic plan is computed and written before execution
 
 A topic plan manifest is written to:
 
@@ -185,6 +195,7 @@ python -m organizer analyze --config sample_config.yaml
 python -m organizer analyze \
   --source-root "C:/data/messy_source" \
   --output-root "C:/data/messy_source_out" \
+  --keep-alive "20m" \
   --progress detailed
 ```
 
@@ -214,15 +225,54 @@ Path-related flags:
 - `rename-in-place` requires `--yes-i-understand`.
 - Topic planning happens before execution; execution only applies the precomputed plan.
 - Missing dependencies are checked before long-running work begins.
+- Empty directories are moved to `.trash_empty_dirs` rather than permanently deleted.
 
 ## Manifests Produced
 
 - `topic_plan_<run_id>.json`
 - `manifest_<run_id>.csv`
 - `manifest_<run_id>.json`
-- `folder_rename_<run_id>.json` when folder renames are used
+- `folder_audit_<run_id>.json` when folder audit is run
+- `empty_dirs_<run_id>.json` when garbage collection runs
+- `rename_trace.csv` (or `rename_trace_preview.csv` in dry-run)
 - `summary_<run_id>.json`
 - `state.json`
+
+## Cache Internals
+
+The organizer persists cache data in `state.json` under the manifest directory.
+
+Current cache layers:
+
+- `files`: fingerprint-based reuse by relative path (`size + mtime`), storing snippet and last classification.
+- `classification_cache`: content-hash keyed classification reuse across path changes.
+- `concept_cache`: intermediate concept fields (`parent_topic`, `subtopic`, `descriptor`, confidence, rename policy).
+
+Classification cache key inputs:
+
+- normalized filename
+- extension
+- normalized extracted snippet
+- model name
+- `prompt_version`
+- `schema_version`
+
+This means cache invalidates cleanly when prompt/schema/model changes, while unchanged content can be reused across reruns.
+
+Recommended settings for stable reuse:
+
+- keep `prompt_version` and `schema_version` stable unless behavior changes intentionally
+- avoid changing model name between benchmark runs
+- keep prompt prefix/instructions deterministic
+
+Relevant config keys:
+
+- `cache_enabled`
+- `prompt_version`
+- `schema_version`
+- `keep_alive`
+
+Note: the summary includes `cache_hits` and `cache_misses` from classification requests that pass through the classifier stage.
 
 ## Install Troubleshooting
 

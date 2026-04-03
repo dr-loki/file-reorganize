@@ -1,0 +1,21 @@
+{
+  "total_scanned": 5,
+  "supported_files": 5,
+  "extracted_successfully": 5,
+  "classified_successfully": 5,
+  "low_confidence_files": 0,
+  "low_confidence_preserved_names": 0,
+  "cache_hits": 0,
+  "cache_misses": 5,
+  "duplicates": 0,
+  "topic_folders_created": 0,
+  "subtopic_folders_created": 0,
+  "files_routed_to_misc": 5,
+  "empty_dirs_trashed": 0,
+  "rename_trace_rows": 5,
+  "renamed": 0,
+  "copied": 0,
+  "moved": 0,
+  "skipped": 0,
+  "errors": 0
+}

@@ -58,6 +58,64 @@ def sanitize_folder_path(path: str, max_words: int, max_depth: int) -> str:
     return "/".join(safe_parts) if safe_parts else "unclear/needs_review"
 
 
+def normalize_snippet_text(value: str, max_chars: int = 1600) -> str:
+    text = normalize_ascii(value)
+    text = text.replace("\x00", " ")
+    text = re.sub(r"[\r\t]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars]
+
+
+def is_noisy_text(value: str) -> bool:
+    if not value:
+        return True
+    sample = value[:1200]
+    alpha = sum(1 for c in sample if c.isalpha())
+    printable = sum(1 for c in sample if c.isprintable())
+    if printable == 0:
+        return True
+    # Reject snippets with very low alphabetic signal.
+    return (alpha / max(1, len(sample))) < 0.15
+
+
+def infer_date_from_text(value: str) -> str | None:
+    for pattern in DATE_PATTERNS:
+        match = pattern.search(value)
+        if not match:
+            continue
+        return normalize_date(match.group(0))
+    return None
+
+
+def first_meaningful_line(value: str) -> str:
+    for line in value.splitlines():
+        cleaned = normalize_snippet_text(line, max_chars=180)
+        if len(cleaned) >= 8:
+            return cleaned
+    return ""
+
+
+def build_classification_cache_key(
+    filename: str,
+    extension: str,
+    snippet: str,
+    model_name: str,
+    prompt_version: str,
+    schema_version: str,
+) -> str:
+    payload = "\n".join(
+        [
+            normalize_snippet_text(filename, max_chars=120),
+            extension.lower(),
+            normalize_snippet_text(snippet, max_chars=1400),
+            model_name,
+            prompt_version,
+            schema_version,
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+
 def normalize_date(raw: str | None) -> str | None:
     if not raw:
         return None

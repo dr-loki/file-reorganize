@@ -15,8 +15,8 @@ except Exception:  # pragma: no cover
     Table = None
 
 from .dependencies import check_runtime_dependencies, run_doctor
-from .executor import apply_actions, apply_folder_renames
-from .manifest import build_summary, write_action_manifest, write_folder_manifest, write_topic_plan_manifest
+from .executor import apply_actions, apply_folder_renames, garbage_collect_empty_dirs
+from .manifest import build_summary, write_action_manifest, write_empty_dir_manifest, write_folder_manifest, write_topic_plan_manifest
 from .models import FileRecord, RunStats
 from .planner import build_folder_rename_plan, plan_actions
 from .progress import emit
@@ -53,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ollama-url", type=str, default=None)
     parser.add_argument("--workers-extract", type=int, default=None)
     parser.add_argument("--workers-llm", type=int, default=None)
+    parser.add_argument("--keep-alive", type=str, default=None)
     parser.add_argument("--progress", choices=["off", "basic", "detailed"], default="basic")
     parser.add_argument("--progress-refresh-ms", type=int, default=250)
     parser.add_argument("--dry-run", action="store_true", default=None)
@@ -77,6 +78,7 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "ollama_url": args.ollama_url,
         "workers_extract": args.workers_extract,
         "workers_llm": args.workers_llm,
+        "keep_alive": args.keep_alive,
         "dry_run": dry_run,
     }
 
@@ -230,7 +232,11 @@ def main() -> int:
         emit(
             reporter,
             phase="startup",
-            message=f"mode={cfg.mode}",
+            message=(
+                f"mode={cfg.mode} model={cfg.model} workers_llm={cfg.workers_llm} "
+                f"keep_alive={cfg.keep_alive} cache={'on' if cfg.cache_enabled else 'off'} "
+                f"ocr={'on' if cfg.ocr_enabled else 'off'}"
+            ),
             current_path=cfg.source_root.as_posix(),
         )
 
@@ -245,6 +251,10 @@ def main() -> int:
             _print("[yellow]Warning:[/yellow] no-dry-run requested in a non-destructive mode")
 
         state = load_state(cfg.state_file)
+        if "classification_cache" not in state or not isinstance(state.get("classification_cache"), dict):
+            state["classification_cache"] = {}
+        if "concept_cache" not in state or not isinstance(state.get("concept_cache"), dict):
+            state["concept_cache"] = {}
         stats = RunStats()
 
         logging.info("Starting mode=%s source=%s output=%s", cfg.mode, cfg.source_root, cfg.output_root)
@@ -275,7 +285,13 @@ def main() -> int:
 
         classify_targets = [r for r in records if r.rel_path.as_posix() not in classifications]
         if classify_targets:
-            classified = classify_records(classify_targets, cfg, reporter=reporter)
+            classified = classify_records(
+                classify_targets,
+                cfg,
+                reporter=reporter,
+                classification_cache=state["classification_cache"] if cfg.cache_enabled else None,
+                concept_cache=state["concept_cache"] if cfg.cache_enabled else None,
+            )
             classifications.update(classified)
 
         for rec in records:
@@ -284,6 +300,10 @@ def main() -> int:
                 stats.classified_successfully += 1
             else:
                 stats.low_confidence_files += 1
+            if cls.cache_hit:
+                stats.cache_hits += 1
+            else:
+                stats.cache_misses += 1
 
             state["files"][rec.rel_path.as_posix()] = {
                 "fingerprint": rec.fingerprint,
@@ -293,6 +313,16 @@ def main() -> int:
 
         actions, topic_plan = plan_actions(records, classifications, cfg, reporter=reporter)
         stats.duplicates = sum(1 for a in actions if a.duplicate_of is not None)
+        stats.files_routed_to_misc = sum(1 for a in actions if a.folder_path.startswith("misc_topics"))
+        stats.low_confidence_preserved_names = sum(
+            1 for a in actions if a.preserve_original_name and a.confidence < cfg.min_confidence
+        )
+        stats.topic_folders_created = sum(
+            1 for v in topic_plan.values() if isinstance(v, dict) and v.get("folder") != "misc_topics"
+        )
+        stats.subtopic_folders_created = sum(
+            len(v.get("subtopics", [])) for v in topic_plan.values() if isinstance(v, dict)
+        )
 
         emit(reporter, phase="manifest", message="Writing topic plan manifest")
         topic_plan_path = write_topic_plan_manifest(topic_plan, cfg.manifest_dir, run_id)
@@ -303,21 +333,35 @@ def main() -> int:
             apply_folder_renames(folder_plan, cfg, stats, reporter=reporter)
             emit(reporter, phase="manifest", message="Writing folder rename manifest")
             folder_manifest = write_folder_manifest(folder_plan, cfg.manifest_dir, run_id)
-            _print(f"Folder rename manifest: {folder_manifest}")
+            _print(f"Folder audit manifest: {folder_manifest}")
+
+            if cfg.garbage_collect_empty_dirs:
+                trashed = garbage_collect_empty_dirs(cfg.source_root, cfg, stats, reporter=reporter)
+                emit(reporter, phase="manifest", message="Writing empty-dir trash manifest")
+                trash_manifest = write_empty_dir_manifest(trashed, cfg.manifest_dir, run_id)
+                _print(f"Empty-dir manifest: {trash_manifest}")
 
         if cfg.mode != "folder-rename-only":
-            apply_actions(actions, cfg, stats, reporter=reporter)
+            apply_actions(actions, cfg, stats, run_id=run_id, reporter=reporter)
             emit(reporter, phase="manifest", message="Writing action manifests")
             csv_path, json_path = write_action_manifest(actions, cfg.manifest_dir, run_id)
             _print(f"CSV manifest: {csv_path}")
             _print(f"JSON manifest: {json_path}")
+            trace_path = cfg.rename_trace_file if not cfg.dry_run else cfg.rename_trace_file.with_name("rename_trace_preview.csv")
+            _print(f"Rename trace: {trace_path}")
 
             if cfg.folder_rename_enabled and cfg.mode in {"rename-in-place", "apply-move"}:
                 folder_plan = build_folder_rename_plan(actions, cfg)
                 apply_folder_renames(folder_plan, cfg, stats, reporter=reporter)
                 emit(reporter, phase="manifest", message="Writing folder rename manifest")
                 folder_manifest = write_folder_manifest(folder_plan, cfg.manifest_dir, run_id)
-                _print(f"Folder rename manifest: {folder_manifest}")
+                _print(f"Folder audit manifest: {folder_manifest}")
+
+            if cfg.garbage_collect_empty_dirs and cfg.mode in {"apply-move", "rename-in-place"}:
+                trashed = garbage_collect_empty_dirs(cfg.source_root, cfg, stats, reporter=reporter)
+                emit(reporter, phase="manifest", message="Writing empty-dir trash manifest")
+                trash_manifest = write_empty_dir_manifest(trashed, cfg.manifest_dir, run_id)
+                _print(f"Empty-dir manifest: {trash_manifest}")
 
         emit(reporter, phase="state", message="Saving run state")
         save_state(cfg.state_file, state)

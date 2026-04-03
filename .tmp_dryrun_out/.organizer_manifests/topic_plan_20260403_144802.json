@@ -1,0 +1,31 @@
+{
+  "astrology": {
+    "folder": "misc_topics",
+    "parent_topic": "astrology",
+    "subtopics": [],
+    "count": 2,
+    "examples": [
+      "C:/Users/Admin/Desktop/Disk ReOrganizer/.tmp_dryrun_input/legacy/Astrology Notes/astrology_natal_profile.md",
+      "C:/Users/Admin/Desktop/Disk ReOrganizer/.tmp_dryrun_input/legacy/Astrology Notes/astrology_transit_report_2024.txt"
+    ]
+  },
+  "finance": {
+    "folder": "misc_topics",
+    "parent_topic": "finance",
+    "subtopics": [],
+    "count": 2,
+    "examples": [
+      "C:/Users/Admin/Desktop/Disk ReOrganizer/.tmp_dryrun_input/legacy/Old Files/tax_invoice_q1_2025.txt",
+      "C:/Users/Admin/Desktop/Disk ReOrganizer/.tmp_dryrun_input/legacy/Old Files/receipt_2025_02.csv"
+    ]
+  },
+  "projects": {
+    "folder": "misc_topics",
+    "parent_topic": "projects",
+    "subtopics": [],
+    "count": 1,
+    "examples": [
+      "C:/Users/Admin/Desktop/Disk ReOrganizer/.tmp_dryrun_input/legacy/Old Files/project_proposal_alpha.md"
+    ]
+  }
+}

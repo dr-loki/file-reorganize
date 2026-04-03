@@ -8,7 +8,13 @@ from .models import ClassificationResult, Config, FileRecord, FolderSummary, Pla
 from .progress import ProgressReporter, emit
 from .utils import hash_file, sanitize_token, stable_collision_suffix, stem_for_name
 
-MIN_TOPIC_SIZE = 3
+
+def _normalize_topic_label(raw: str) -> str:
+    base = sanitize_token(raw, max_words=4, max_length=42)
+    for suffix in ("_misc", "_other", "_notes", "_files"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)] or base
+    return base
 
 
 def plan_actions(
@@ -17,7 +23,7 @@ def plan_actions(
     config: Config,
     reporter: ProgressReporter | None = None,
 ) -> tuple[list[PlannedAction], dict[str, dict[str, Any]]]:
-    staged: list[tuple[FileRecord, ClassificationResult, str, str, str]] = []
+    staged: list[tuple[FileRecord, ClassificationResult, str, str | None, str, str]] = []
     duplicate_map: dict[str, Path] = {}
 
     emit(reporter, phase="planning", message="Preparing semantic topic plan")
@@ -30,7 +36,10 @@ def plan_actions(
             max_length=config.max_filename_length,
         )
         date = cls.document_date if (config.include_dates and cls.date_relevant) else None
-        topic = cls.normalized_topic or cls.normalized_descriptor or "needs_review"
+        parent = _normalize_topic_label(cls.parent_topic or "misc_topics")
+        subtopic = _normalize_topic_label(cls.subtopic or "") if cls.subtopic else None
+        if parent in {"", "unclear", "needs_review"}:
+            parent = "misc_topics"
 
         if config.detect_duplicates:
             try:
@@ -38,69 +47,93 @@ def plan_actions(
             except Exception:
                 rec.content_hash = None
 
-        staged.append((rec, cls, topic, date or "", descriptor))
+        staged.append((rec, cls, parent, subtopic, date or "", descriptor))
 
     staged.sort(
         key=lambda x: (
             x[2],
             x[3],
             x[4],
+            x[5],
             x[0].rel_path.as_posix(),
         )
     )
 
-    topic_counts = Counter(topic for _, _, topic, _, _ in staged)
-    large_topics = {topic for topic, count in topic_counts.items() if count >= MIN_TOPIC_SIZE}
-    small_topics = {topic for topic, count in topic_counts.items() if count < MIN_TOPIC_SIZE}
+    parent_counts = Counter(parent for _, _, parent, _, _, _ in staged)
+    subtopic_counts = Counter((parent, sub or "") for _, _, parent, sub, _, _ in staged if sub)
+    large_parents = {topic for topic, count in parent_counts.items() if count >= config.min_topic_size}
+    eligible_subtopics = {
+        key for key, count in subtopic_counts.items() if count >= config.min_subtopic_size and key[0] in large_parents
+    }
 
-    emit(reporter, phase="topic_clustering", message="Building topic histogram", completed=0, total=len(topic_counts))
+    emit(reporter, phase="topic_clustering", message="Building parent/subtopic histogram", completed=0, total=len(parent_counts))
 
-    examples_by_topic: dict[str, list[str]] = defaultdict(list)
-    for rec, _, topic, _, _ in staged:
-        if len(examples_by_topic[topic]) < 3:
-            examples_by_topic[topic].append(rec.source_path.as_posix())
+    examples_by_parent: dict[str, list[str]] = defaultdict(list)
+    for rec, _, parent, _, _, _ in staged:
+        if len(examples_by_parent[parent]) < 3:
+            examples_by_parent[parent].append(rec.source_path.as_posix())
 
     topic_plan: dict[str, dict[str, Any]] = {}
-    for idx, (topic, count) in enumerate(sorted(topic_counts.items()), start=1):
-        folder = topic if topic in large_topics else "misc_topics"
-        topic_plan[topic] = {
+    for idx, (parent, count) in enumerate(sorted(parent_counts.items()), start=1):
+        folder = parent if parent in large_parents else "misc_topics"
+        planned_subtopics = sorted(
+            sub for p, sub in eligible_subtopics if p == parent and sub
+        )
+        topic_plan[parent] = {
             "folder": folder,
+            "parent_topic": parent,
+            "subtopics": planned_subtopics,
             "count": count,
-            "examples": examples_by_topic[topic],
+            "examples": examples_by_parent[parent],
         }
         emit(
             reporter,
             phase="topic_clustering",
             completed=idx,
-            total=len(topic_counts),
-            topic_label=topic,
+            total=len(parent_counts),
+            topic_label=parent,
             message=f"count={count}",
         )
 
+    emit(reporter, phase="topic_normalization", message="Collapsing topic variants and pruning weak subtopics")
     emit(
         reporter,
         phase="planning",
-        message=f"Topics={len(topic_counts)} large={len(large_topics)} misc={len(small_topics)}",
+        message=f"Parents={len(parent_counts)} dedicated={len(large_parents)} subtopics={len(eligible_subtopics)}",
     )
 
-    groups: dict[tuple[str, str, str, str, str], list[tuple[FileRecord, ClassificationResult]]] = defaultdict(list)
-    for rec, cls, topic, date, descriptor in staged:
+    groups: dict[tuple[str, str, str | None, str, str, str], list[tuple[FileRecord, ClassificationResult]]] = defaultdict(list)
+    for rec, cls, parent, subtopic, date, descriptor in staged:
         ext = rec.extension.lower().lstrip(".")
-        folder = topic if topic in large_topics else "misc_topics"
-        groups[(folder, topic, descriptor, date, ext)].append((rec, cls))
+        folder_parent = parent if parent in large_parents else "misc_topics"
+        folder_sub = subtopic if (folder_parent == parent and (parent, subtopic or "") in eligible_subtopics) else None
+        folder = f"{folder_parent}/{folder_sub}" if folder_sub else folder_parent
+        groups[(folder, folder_parent, folder_sub, descriptor, date, ext)].append((rec, cls))
 
     actions: list[PlannedAction] = []
 
     group_items = sorted(groups.items(), key=lambda item: item[0])
-    for group_index, ((folder, topic, descriptor, date, ext), members) in enumerate(group_items, start=1):
+    for group_index, ((folder, folder_parent, folder_sub, descriptor, date, ext), members) in enumerate(group_items, start=1):
         add_seq = len(members) > 1
         for idx, (rec, cls) in enumerate(members, start=1):
-            stem = stem_for_name(date or None, descriptor)
-            if topic in small_topics:
-                stem = f"{topic}_{stem}"[: config.max_filename_length].strip("_")
-            if add_seq:
-                stem = f"{stem}_{idx:03d}"
-            filename = f"{stem}.{ext}"
+            if cls.rename_policy == "preserve_original" or cls.confidence < config.min_confidence:
+                filename = rec.source_path.name
+                preserve_original = True
+            elif cls.rename_policy == "hybrid":
+                base = sanitize_token(rec.source_path.stem, max_words=4, max_length=config.max_filename_length)
+                stem = stem_for_name(date or None, base or descriptor)
+                if add_seq:
+                    stem = f"{stem}_{idx:03d}"
+                filename = f"{stem}.{ext}"
+                preserve_original = False
+            else:
+                stem = stem_for_name(date or None, descriptor)
+                if folder_parent == "misc_topics":
+                    stem = f"{(cls.subtopic or cls.parent_topic or 'misc')}_{stem}"[: config.max_filename_length].strip("_")
+                if add_seq:
+                    stem = f"{stem}_{idx:03d}"
+                filename = f"{stem}.{ext}"
+                preserve_original = False
 
             if config.mode in {"analyze", "apply-copy", "apply-move"}:
                 assert config.output_root is not None
@@ -143,8 +176,12 @@ def plan_actions(
                     confidence=cls.confidence,
                     final_filename=filename,
                     final_destination_path=destination,
-                    topic_label=cls.topic_label or topic,
-                    normalized_topic=topic,
+                    parent_topic=folder_parent,
+                    subtopic=folder_sub,
+                    rename_policy=cls.rename_policy,
+                    preserve_original_name=preserve_original,
+                    topic_label=cls.topic_label or (folder_sub or folder_parent),
+                    normalized_topic=cls.normalized_topic,
                     duplicate_of=duplicate_of,
                 )
             )
@@ -154,7 +191,7 @@ def plan_actions(
             phase="planning",
             completed=group_index,
             total=len(group_items),
-            topic_label=topic,
+            topic_label=f"{folder_parent}/{folder_sub}" if folder_sub else folder_parent,
             message=f"folder={folder}",
         )
 
@@ -189,8 +226,44 @@ def build_folder_rename_plan(
     for action in actions:
         by_folder[action.source_path.parent].append(action)
 
+    all_folders = [p for p in config.source_root.rglob("*") if p.is_dir()]
+    all_folders.sort(key=lambda p: len(p.parts), reverse=True)
+
     summaries: list[FolderSummary] = []
-    for folder, members in by_folder.items():
+    for folder in all_folders:
+        members = by_folder.get(folder, [])
+        if folder == config.source_root:
+            summaries.append(
+                FolderSummary(
+                    source_folder=folder,
+                    proposed_name=folder.name,
+                    normalized_name=folder.name,
+                    semantic_name=folder.name,
+                    action="preserve_with_reason",
+                    confidence=1.0,
+                    reason="Root folder is preserved",
+                    new_path=folder,
+                )
+            )
+            continue
+
+        if not members:
+            normalized_name = sanitize_token(folder.name, max_words=config.max_folder_name_words, max_length=42)
+            action = "normalize" if normalized_name != folder.name.lower() else "trash_if_empty"
+            summaries.append(
+                FolderSummary(
+                    source_folder=folder,
+                    proposed_name=normalized_name if action == "normalize" else folder.name,
+                    normalized_name=normalized_name,
+                    semantic_name=normalized_name,
+                    action=action,
+                    confidence=0.6 if action == "normalize" else 0.55,
+                    reason="No supported files in folder",
+                    new_path=folder.with_name(normalized_name) if action == "normalize" else folder,
+                )
+            )
+            continue
+
         descriptors: dict[str, int] = defaultdict(int)
         for m in members:
             descriptors[m.descriptor] += 1
@@ -202,19 +275,38 @@ def build_folder_rename_plan(
         best_name, count = top[0]
         confidence = count / max(1, len(members))
 
-        if confidence < config.folder_rename_min_confidence:
-            continue
-
+        normalized_name = sanitize_token(folder.name, max_words=config.max_folder_name_words, max_length=42)
         safe_name = sanitize_token(best_name, max_words=config.max_folder_name_words, max_length=42)
-        if safe_name == folder.name.lower():
-            continue
+
+        action = "preserve_with_reason"
+        proposed_name = folder.name
+        reason = "Folder already normalized"
+        final_confidence = confidence
+        if normalized_name != folder.name.lower():
+            action = "normalize"
+            proposed_name = normalized_name
+            reason = "Normalize naming convention"
+
+        if confidence >= config.folder_rename_min_confidence and safe_name and safe_name != normalized_name:
+            action = "semantic_rename"
+            proposed_name = safe_name
+            reason = f"Top descriptor {best_name} in {count}/{len(members)} files"
+            final_confidence = confidence
+
+        if proposed_name == folder.name:
+            action = "preserve_with_reason"
+            reason = "No justified rename"
 
         summaries.append(
             FolderSummary(
                 source_folder=folder,
-                proposed_name=safe_name,
-                confidence=confidence,
-                reason=f"Top descriptor {best_name} in {count}/{len(members)} files",
+                proposed_name=proposed_name,
+                normalized_name=normalized_name,
+                semantic_name=safe_name,
+                action=action,
+                confidence=final_confidence,
+                reason=reason,
+                new_path=folder.with_name(proposed_name),
             )
         )
 

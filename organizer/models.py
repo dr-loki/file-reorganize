@@ -12,6 +12,8 @@ Mode = Literal[
     "folder-rename-only",
 ]
 ActionType = Literal["analyze", "copy", "move", "rename", "folder-rename", "skip"]
+RenamePolicy = Literal["generated", "preserve_original", "hybrid"]
+FolderAction = Literal["normalize", "semantic_rename", "preserve_with_reason", "trash_if_empty"]
 
 
 @dataclass(slots=True)
@@ -24,6 +26,7 @@ class Config:
     timeout_seconds: int = 45
     workers_extract: int = 12
     workers_llm: int = 2
+    keep_alive: str = "20m"
     dry_run: bool = True
     include_dates: bool = True
     max_file_name_words: int = 2
@@ -35,6 +38,12 @@ class Config:
     controlled_taxonomy: bool = True
     taxonomy: list[str] = field(default_factory=list)
     min_confidence: float = 0.65
+    medium_confidence: float = 0.78
+    min_topic_size: int = 3
+    min_subtopic_size: int = 3
+    prompt_version: str = "v3"
+    schema_version: str = "v3"
+    cache_enabled: bool = True
     folder_rename_enabled: bool = False
     folder_rename_min_confidence: float = 0.75
     supported_extensions: list[str] = field(default_factory=list)
@@ -45,8 +54,13 @@ class Config:
     detect_duplicates: bool = True
     skip_existing_in_output: bool = True
     state_file: Path | None = None
+    rename_trace_file: Path | None = None
     manifest_dir: Path | None = None
     log_dir: Path | None = None
+    trash_empty_dir_name: str = ".trash_empty_dirs"
+    garbage_collect_empty_dirs: bool = True
+    max_light_chars: int = 1200
+    max_heavy_chars: int = 3500
 
     def finalize(self) -> None:
         """Normalize all path fields and derive optional paths."""
@@ -63,6 +77,10 @@ class Config:
         if self.state_file is None:
             self.state_file = self.manifest_dir / "state.json"
         self.state_file = Path(self.state_file).expanduser().resolve()
+
+        if self.rename_trace_file is None:
+            self.rename_trace_file = self.output_root / "rename_trace.csv"
+        self.rename_trace_file = Path(self.rename_trace_file).expanduser().resolve()
 
         if self.log_dir is None:
             self.log_dir = self.manifest_dir
@@ -91,10 +109,17 @@ class ClassificationResult:
     folder_path: str
     confidence: float
     reason: str
+    parent_topic: str = "misc_topics"
+    subtopic: str | None = None
+    rename_policy: RenamePolicy = "preserve_original"
+    topic_confidence: float = 0.0
+    ambiguous: bool = False
     normalized_descriptor: str = ""
     normalized_folder_path: str = ""
     topic_label: str = ""
     normalized_topic: str = ""
+    cache_key: str = ""
+    cache_hit: bool = False
 
 
 @dataclass(slots=True)
@@ -111,6 +136,10 @@ class PlannedAction:
     confidence: float
     final_filename: str
     final_destination_path: Path | None
+    parent_topic: str = "misc_topics"
+    subtopic: str | None = None
+    rename_policy: RenamePolicy = "preserve_original"
+    preserve_original_name: bool = False
     topic_label: str = ""
     normalized_topic: str = ""
     status: str = "planned"
@@ -122,8 +151,20 @@ class PlannedAction:
 class FolderSummary:
     source_folder: Path
     proposed_name: str
+    normalized_name: str
+    semantic_name: str
+    action: FolderAction
     confidence: float
     reason: str
+    new_path: Path | None = None
+    status: str = "planned"
+    error_message: str = ""
+
+
+@dataclass(slots=True)
+class EmptyDirTrashAction:
+    old_path: Path
+    new_path: Path
     status: str = "planned"
     error_message: str = ""
 
@@ -135,7 +176,15 @@ class RunStats:
     extracted_successfully: int = 0
     classified_successfully: int = 0
     low_confidence_files: int = 0
+    low_confidence_preserved_names: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
     duplicates: int = 0
+    topic_folders_created: int = 0
+    subtopic_folders_created: int = 0
+    files_routed_to_misc: int = 0
+    empty_dirs_trashed: int = 0
+    rename_trace_rows: int = 0
     renamed: int = 0
     copied: int = 0
     moved: int = 0

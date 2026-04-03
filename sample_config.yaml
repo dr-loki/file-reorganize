@@ -6,6 +6,7 @@ model: llama3.2:3b
 timeout_seconds: 45
 workers_extract: 12
 workers_llm: 2
+keep_alive: 20m
 dry_run: true
 include_dates: true
 max_file_name_words: 2
@@ -33,6 +34,12 @@ taxonomy:
   - media/scans
   - unclear/needs_review
 min_confidence: 0.65
+medium_confidence: 0.78
+min_topic_size: 3
+min_subtopic_size: 3
+prompt_version: v3
+schema_version: v3
+cache_enabled: true
 folder_rename_enabled: false
 folder_rename_min_confidence: 0.75
 supported_extensions:
@@ -43,11 +50,16 @@ supported_extensions:
   - .csv
 exclude_paths: []
 exclude_extensions: []
-review_bucket: unclear/needs_review
+review_bucket: misc_topics
 skip_duplicates: true
 detect_duplicates: true
 skip_existing_in_output: true
+trash_empty_dir_name: .trash_empty_dirs
+garbage_collect_empty_dirs: true
+max_light_chars: 1200
+max_heavy_chars: 3500
 # Optional: if omitted they are derived from output_root
 # manifest_dir: C:/data/messy_source_out/.organizer_manifests
 # state_file: C:/data/messy_source_out/.organizer_manifests/state.json
+# rename_trace_file: C:/data/messy_source_out/rename_trace.csv
 # log_dir: C:/data/messy_source_out/.organizer_manifests

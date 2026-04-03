@@ -10,6 +10,7 @@ from docx import Document
 
 from .models import Config, FileRecord
 from .progress import ProgressReporter, emit
+from .utils import is_noisy_text, normalize_snippet_text
 
 try:
     from PIL import Image
@@ -21,7 +22,7 @@ except Exception:  # pragma: no cover
 
 def _read_text_file(path: Path, max_chars: int = 3500) -> str:
     raw = path.read_text(encoding="utf-8", errors="ignore")
-    return raw.strip()[:max_chars]
+    return normalize_snippet_text(raw, max_chars=max_chars)
 
 
 def _extract_pdf(path: Path, config: Config, max_chars: int = 3500) -> str:
@@ -31,13 +32,13 @@ def _extract_pdf(path: Path, config: Config, max_chars: int = 3500) -> str:
         first_page = doc[0]
         text = first_page.get_text("text", sort=True).strip()
         if text:
-            return text[:max_chars]
+            return normalize_snippet_text(text, max_chars=max_chars)
 
         if config.ocr_on_scanned_pdfs and config.ocr_enabled and pytesseract and Image:
             pix = first_page.get_pixmap(dpi=200)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             ocr = pytesseract.image_to_string(img).strip()
-            return ocr[:max_chars]
+            return normalize_snippet_text(ocr, max_chars=max_chars)
 
     return ""
 
@@ -58,7 +59,7 @@ def _extract_docx(path: Path, max_chars: int = 3500) -> str:
         if len("\n".join(chunks)) >= max_chars:
             break
 
-    return "\n".join(chunks)[:max_chars]
+    return normalize_snippet_text("\n".join(chunks), max_chars=max_chars)
 
 
 def _extract_csv(path: Path, max_chars: int = 3500) -> str:
@@ -70,30 +71,45 @@ def _extract_csv(path: Path, max_chars: int = 3500) -> str:
             out.write("\n")
             if idx >= 24:
                 break
-    return out.getvalue().strip()[:max_chars]
+    return normalize_snippet_text(out.getvalue(), max_chars=max_chars)
 
 
 def _extract_image(path: Path, config: Config, max_chars: int = 3500) -> str:
     if not config.ocr_enabled or not pytesseract or not Image:
         return ""
     with Image.open(path) as img:
-        return pytesseract.image_to_string(img).strip()[:max_chars]
+        return normalize_snippet_text(pytesseract.image_to_string(img).strip(), max_chars=max_chars)
+
+
+def _build_lightweight_snippet(path: Path, extension: str, config: Config) -> str:
+    if extension in {".txt", ".md"}:
+        return _read_text_file(path, max_chars=config.max_light_chars)
+    if extension == ".csv":
+        return _extract_csv(path, max_chars=config.max_light_chars)
+    if extension == ".docx":
+        return _extract_docx(path, max_chars=config.max_light_chars)
+    if extension == ".pdf":
+        return _extract_pdf(path, config, max_chars=config.max_light_chars)
+    return ""
 
 
 def extract_single(record: FileRecord, config: Config) -> FileRecord:
     path = record.source_path
     try:
-        if record.extension == ".pdf":
-            snippet = _extract_pdf(path, config)
-        elif record.extension == ".docx":
-            snippet = _extract_docx(path)
-        elif record.extension in {".txt", ".md"}:
-            snippet = _read_text_file(path)
-        elif record.extension == ".csv":
-            snippet = _extract_csv(path)
-        elif record.extension in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"}:
-            snippet = _extract_image(path, config)
-        else:
+        snippet = _build_lightweight_snippet(path, record.extension, config)
+        if len(snippet) < 120:
+            if record.extension == ".pdf":
+                snippet = _extract_pdf(path, config, max_chars=config.max_heavy_chars)
+            elif record.extension == ".docx":
+                snippet = _extract_docx(path, max_chars=config.max_heavy_chars)
+            elif record.extension in {".txt", ".md"}:
+                snippet = _read_text_file(path, max_chars=config.max_heavy_chars)
+            elif record.extension == ".csv":
+                snippet = _extract_csv(path, max_chars=config.max_heavy_chars)
+            elif record.extension in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"}:
+                snippet = _extract_image(path, config, max_chars=config.max_heavy_chars)
+
+        if is_noisy_text(snippet):
             snippet = ""
 
         record.extracted_snippet = snippet
