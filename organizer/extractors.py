@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
 from pathlib import Path
 
@@ -9,6 +9,7 @@ import fitz
 from docx import Document
 
 from .models import Config, FileRecord
+from .progress import ProgressReporter, emit
 
 try:
     from PIL import Image
@@ -106,9 +107,31 @@ def extract_single(record: FileRecord, config: Config) -> FileRecord:
     return record
 
 
-def extract_records(records: list[FileRecord], config: Config) -> list[FileRecord]:
+def extract_records(
+    records: list[FileRecord],
+    config: Config,
+    reporter: ProgressReporter | None = None,
+) -> list[FileRecord]:
     if not records:
         return []
 
+    emit(reporter, phase="extracting", message="Extracting file contents", completed=0, total=len(records))
+
+    completed = 0
+    extracted: list[FileRecord] = []
     with ThreadPoolExecutor(max_workers=max(1, config.workers_extract)) as pool:
-        return list(pool.map(lambda r: extract_single(r, config), records))
+        future_map = {pool.submit(extract_single, record, config): record for record in records}
+        for future in as_completed(future_map):
+            record = future.result()
+            extracted.append(record)
+            completed += 1
+            emit(
+                reporter,
+                phase="extracting",
+                completed=completed,
+                total=len(records),
+                current_path=record.source_path.as_posix(),
+            )
+
+    extracted.sort(key=lambda record: record.rel_path.as_posix())
+    return extracted

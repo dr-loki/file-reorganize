@@ -93,6 +93,8 @@ class ClassificationResult:
     reason: str
     normalized_descriptor: str = ""
     normalized_folder_path: str = ""
+    topic_label: str = ""
+    normalized_topic: str = ""
 
 
 @dataclass(slots=True)
@@ -109,6 +111,8 @@ class PlannedAction:
     confidence: float
     final_filename: str
     final_destination_path: Path | None
+    topic_label: str = ""
+    normalized_topic: str = ""
     status: str = "planned"
     error_message: str = ""
     duplicate_of: Path | None = None

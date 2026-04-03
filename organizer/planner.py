@@ -1,19 +1,26 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Any
 
 from .models import ClassificationResult, Config, FileRecord, FolderSummary, PlannedAction
+from .progress import ProgressReporter, emit
 from .utils import hash_file, sanitize_token, stable_collision_suffix, stem_for_name
+
+MIN_TOPIC_SIZE = 3
 
 
 def plan_actions(
     records: list[FileRecord],
     classifications: dict[str, ClassificationResult],
     config: Config,
-) -> list[PlannedAction]:
+    reporter: ProgressReporter | None = None,
+) -> tuple[list[PlannedAction], dict[str, dict[str, Any]]]:
     staged: list[tuple[FileRecord, ClassificationResult, str, str, str]] = []
     duplicate_map: dict[str, Path] = {}
+
+    emit(reporter, phase="planning", message="Preparing semantic topic plan")
 
     for rec in records:
         cls = classifications[rec.rel_path.as_posix()]
@@ -23,7 +30,7 @@ def plan_actions(
             max_length=config.max_filename_length,
         )
         date = cls.document_date if (config.include_dates and cls.date_relevant) else None
-        folder = cls.normalized_folder_path
+        topic = cls.normalized_topic or cls.normalized_descriptor or "needs_review"
 
         if config.detect_duplicates:
             try:
@@ -31,39 +38,77 @@ def plan_actions(
             except Exception:
                 rec.content_hash = None
 
-        staged.append((rec, cls, descriptor, date or "", folder))
+        staged.append((rec, cls, topic, date or "", descriptor))
 
     staged.sort(
         key=lambda x: (
-            x[4],
             x[2],
             x[3],
+            x[4],
             x[0].rel_path.as_posix(),
         )
     )
 
-    groups: dict[tuple[str, str, str, str], list[tuple[FileRecord, ClassificationResult]]] = defaultdict(list)
-    for rec, cls, descriptor, date, folder in staged:
+    topic_counts = Counter(topic for _, _, topic, _, _ in staged)
+    large_topics = {topic for topic, count in topic_counts.items() if count >= MIN_TOPIC_SIZE}
+    small_topics = {topic for topic, count in topic_counts.items() if count < MIN_TOPIC_SIZE}
+
+    emit(reporter, phase="topic_clustering", message="Building topic histogram", completed=0, total=len(topic_counts))
+
+    examples_by_topic: dict[str, list[str]] = defaultdict(list)
+    for rec, _, topic, _, _ in staged:
+        if len(examples_by_topic[topic]) < 3:
+            examples_by_topic[topic].append(rec.source_path.as_posix())
+
+    topic_plan: dict[str, dict[str, Any]] = {}
+    for idx, (topic, count) in enumerate(sorted(topic_counts.items()), start=1):
+        folder = topic if topic in large_topics else "misc_topics"
+        topic_plan[topic] = {
+            "folder": folder,
+            "count": count,
+            "examples": examples_by_topic[topic],
+        }
+        emit(
+            reporter,
+            phase="topic_clustering",
+            completed=idx,
+            total=len(topic_counts),
+            topic_label=topic,
+            message=f"count={count}",
+        )
+
+    emit(
+        reporter,
+        phase="planning",
+        message=f"Topics={len(topic_counts)} large={len(large_topics)} misc={len(small_topics)}",
+    )
+
+    groups: dict[tuple[str, str, str, str, str], list[tuple[FileRecord, ClassificationResult]]] = defaultdict(list)
+    for rec, cls, topic, date, descriptor in staged:
         ext = rec.extension.lower().lstrip(".")
-        groups[(folder, descriptor, date, ext)].append((rec, cls))
+        folder = topic if topic in large_topics else "misc_topics"
+        groups[(folder, topic, descriptor, date, ext)].append((rec, cls))
 
     actions: list[PlannedAction] = []
 
-    for (folder, descriptor, date, ext), members in sorted(groups.items()):
+    group_items = sorted(groups.items(), key=lambda item: item[0])
+    for group_index, ((folder, topic, descriptor, date, ext), members) in enumerate(group_items, start=1):
         add_seq = len(members) > 1
         for idx, (rec, cls) in enumerate(members, start=1):
             stem = stem_for_name(date or None, descriptor)
+            if topic in small_topics:
+                stem = f"{topic}_{stem}"[: config.max_filename_length].strip("_")
             if add_seq:
                 stem = f"{stem}_{idx:03d}"
             filename = f"{stem}.{ext}"
 
-            if config.mode in {"apply-copy", "apply-move"}:
+            if config.mode in {"analyze", "apply-copy", "apply-move"}:
                 assert config.output_root is not None
                 destination = (config.output_root / folder / filename).resolve()
             elif config.mode in {"rename-in-place", "folder-rename-only"}:
                 destination = (config.source_root / folder / filename).resolve()
             else:
-                destination = (config.source_root / "_plan_preview" / folder / filename).resolve()
+                destination = (config.output_root / folder / filename).resolve()
 
             action_type = "analyze"
             if config.mode == "apply-copy":
@@ -98,12 +143,23 @@ def plan_actions(
                     confidence=cls.confidence,
                     final_filename=filename,
                     final_destination_path=destination,
+                    topic_label=cls.topic_label or topic,
+                    normalized_topic=topic,
                     duplicate_of=duplicate_of,
                 )
             )
 
+        emit(
+            reporter,
+            phase="planning",
+            completed=group_index,
+            total=len(group_items),
+            topic_label=topic,
+            message=f"folder={folder}",
+        )
+
     _dedupe_destinations(actions)
-    return actions
+    return actions, topic_plan
 
 
 def _dedupe_destinations(actions: list[PlannedAction]) -> None:

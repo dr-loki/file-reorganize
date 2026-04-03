@@ -18,6 +18,9 @@ dependencies = [
   "rich>=13.7.0",
 ]
 
+[project.scripts]
+organizer = "organizer.__main__:main"
+
 [project.optional-dependencies]
 ocr = [
   "Pillow>=10.0.0",

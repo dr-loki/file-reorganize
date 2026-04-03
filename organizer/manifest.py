@@ -18,6 +18,8 @@ def write_action_manifest(actions: list[PlannedAction], manifest_dir: Path, run_
         "file_type",
         "extracted_snippet",
         "descriptor",
+        "topic_label",
+        "normalized_topic",
         "date_relevant",
         "normalized_date",
         "folder_path",
@@ -38,6 +40,8 @@ def write_action_manifest(actions: list[PlannedAction], manifest_dir: Path, run_
                 "file_type": a.file_type,
                 "extracted_snippet": a.extracted_snippet,
                 "descriptor": a.descriptor,
+                "topic_label": a.topic_label,
+                "normalized_topic": a.normalized_topic,
                 "date_relevant": a.date_relevant,
                 "normalized_date": a.normalized_date,
                 "folder_path": a.folder_path,
@@ -59,6 +63,14 @@ def write_action_manifest(actions: list[PlannedAction], manifest_dir: Path, run_
         json.dump(rows, f, indent=2, ensure_ascii=True)
 
     return csv_path, json_path
+
+
+def write_topic_plan_manifest(topic_plan: dict[str, dict[str, object]], manifest_dir: Path, run_id: str) -> Path:
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    json_path = manifest_dir / f"topic_plan_{run_id}.json"
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(topic_plan, f, indent=2, ensure_ascii=True)
+    return json_path
 
 
 def write_folder_manifest(summaries: list[FolderSummary], manifest_dir: Path, run_id: str) -> Path:

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
 
 from .models import ClassificationResult, Config, FileRecord
-from .utils import choose_descriptor, extract_json_object, normalize_date, sanitize_folder_path
+from .progress import ProgressReporter, emit
+from .utils import choose_descriptor, extract_json_object, normalize_date, sanitize_folder_path, sanitize_token
+
+TOPIC_MAX_WORDS = 4
 
 
 def _build_prompt(snippet: str, config: Config) -> str:
@@ -20,13 +23,15 @@ def _build_prompt(snippet: str, config: Config) -> str:
         "Return JSON only, no prose, no markdown.\n"
         "Rules:\n"
         "- descriptor must be 1 word when possible, 2 words max\n"
+        "- topic_label must be 2 to 4 words when possible and represent the dominant subject\n"
+        "- topic_label must be specific and content-driven, not a broad bucket like finance or research\n"
         "- lowercase and underscore style\n"
         "- avoid generic descriptors unless no better option\n"
         "- include document_date only if materially relevant and confident\n"
         "- if uncertain use folder_path unclear/needs_review\n"
         f"- {mode_hint}\n"
         "Expected schema:\n"
-        '{"descriptor":"invoice","date_relevant":true,"document_date":"2024-03-15","folder_path":"finance/invoices","confidence":0.93,"reason":"short reason"}\n\n'
+        '{"descriptor":"invoice","date_relevant":true,"document_date":"2024-03-15","folder_path":"finance/invoices","confidence":0.93,"reason":"short reason","topic_label":"clinical_data_quality_audit"}\n\n'
         "Allowed taxonomy:\n"
         f"{taxonomy_text}\n\n"
         "Document snippet:\n"
@@ -64,9 +69,15 @@ def _sanitize_result(raw: dict[str, Any], config: Config) -> ClassificationResul
     confidence = float(raw.get("confidence", 0.0))
     date_relevant = bool(raw.get("date_relevant", False))
     document_date = normalize_date(str(raw.get("document_date"))) if date_relevant else None
+    raw_topic = str(raw.get("topic_label", "")).strip()
+    if not raw_topic:
+        raw_topic = descriptor
 
     folder_raw = str(raw.get("folder_path", config.review_bucket))
     safe_folder = sanitize_folder_path(folder_raw, config.max_folder_name_words, config.max_folder_depth)
+    normalized_topic = sanitize_token(raw_topic, max_words=TOPIC_MAX_WORDS, max_length=42)
+    if not normalized_topic:
+        normalized_topic = descriptor or "needs_review"
 
     if config.controlled_taxonomy:
         allowed = {t.lower() for t in config.taxonomy}
@@ -75,6 +86,7 @@ def _sanitize_result(raw: dict[str, Any], config: Config) -> ClassificationResul
 
     if confidence < config.min_confidence:
         safe_folder = config.review_bucket
+        normalized_topic = descriptor or "needs_review"
 
     return ClassificationResult(
         descriptor=descriptor,
@@ -85,6 +97,8 @@ def _sanitize_result(raw: dict[str, Any], config: Config) -> ClassificationResul
         reason=str(raw.get("reason", ""))[:240],
         normalized_descriptor=descriptor,
         normalized_folder_path=safe_folder,
+        topic_label=raw_topic,
+        normalized_topic=normalized_topic,
     )
 
 
@@ -99,6 +113,8 @@ def classify_single(record: FileRecord, config: Config) -> ClassificationResult:
             reason="No extracted content",
             normalized_descriptor="needs_review",
             normalized_folder_path=config.review_bucket,
+            topic_label="needs_review",
+            normalized_topic="needs_review",
         )
 
     prompt = _build_prompt(record.extracted_snippet, config)
@@ -106,7 +122,11 @@ def classify_single(record: FileRecord, config: Config) -> ClassificationResult:
     return _sanitize_result(raw, config)
 
 
-def classify_records(records: list[FileRecord], config: Config) -> dict[str, ClassificationResult]:
+def classify_records(
+    records: list[FileRecord],
+    config: Config,
+    reporter: ProgressReporter | None = None,
+) -> dict[str, ClassificationResult]:
     results: dict[str, ClassificationResult] = {}
 
     def worker(rec: FileRecord) -> tuple[str, ClassificationResult]:
@@ -125,12 +145,28 @@ def classify_records(records: list[FileRecord], config: Config) -> dict[str, Cla
                     reason=f"Classification error: {exc}",
                     normalized_descriptor="needs_review",
                     normalized_folder_path=config.review_bucket,
+                    topic_label="needs_review",
+                    normalized_topic="needs_review",
                 ),
             )
 
+    emit(reporter, phase="classifying", message="Classifying extracted content", completed=0, total=len(records))
+
+    completed = 0
     with ThreadPoolExecutor(max_workers=max(1, config.workers_llm)) as pool:
-        for key, value in pool.map(worker, records):
+        future_map = {pool.submit(worker, record): record for record in records}
+        for future in as_completed(future_map):
+            key, value = future.result()
             results[key] = value
+            completed += 1
+            emit(
+                reporter,
+                phase="classifying",
+                completed=completed,
+                total=len(records),
+                current_path=future_map[future].source_path.as_posix(),
+                topic_label=value.normalized_topic,
+            )
 
     return results
 
@@ -143,6 +179,8 @@ def to_jsonable(result: ClassificationResult) -> dict[str, Any]:
         "folder_path": result.folder_path,
         "confidence": result.confidence,
         "reason": result.reason,
+        "topic_label": result.topic_label,
+        "normalized_topic": result.normalized_topic,
     }
 
 
@@ -158,4 +196,10 @@ def from_jsonable(data: dict[str, Any], review_bucket: str) -> ClassificationRes
         reason=str(data.get("reason", "")),
         normalized_descriptor=descriptor,
         normalized_folder_path=folder,
+        topic_label=str(data.get("topic_label", descriptor)),
+        normalized_topic=sanitize_token(
+            str(data.get("normalized_topic", data.get("topic_label", descriptor))),
+            max_words=TOPIC_MAX_WORDS,
+            max_length=42,
+        ) or descriptor,
     )
