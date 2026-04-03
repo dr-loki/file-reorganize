@@ -14,6 +14,7 @@ from .classify import classify_records, from_jsonable, to_jsonable
 from .config import ConfigError, load_config
 from .executor import apply_actions, apply_folder_renames
 from .extractors import extract_records
+from .gui_select import select_directory
 from .manifest import build_summary, write_action_manifest, write_folder_manifest
 from .models import FileRecord, RunStats
 from .planner import build_folder_rename_plan, plan_actions
@@ -29,9 +30,15 @@ def build_parser() -> argparse.ArgumentParser:
         description="Disk ReOrganizer: content-aware local LLM disk organizer",
     )
     parser.add_argument("mode", choices=["analyze", "apply-copy", "apply-move", "rename-in-place", "folder-rename-only"])
-    parser.add_argument("source_root", type=str)
-    parser.add_argument("output_root", nargs="?", default=None)
+
     parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--source-root", type=str, default=None, help="Source/target folder path")
+    parser.add_argument("--output-root", type=str, default=None, help="Output folder path")
+    parser.add_argument("--manifest-dir", type=str, default=None, help="Manifest directory path")
+    parser.add_argument("--state-file", type=str, default=None, help="State file path")
+    parser.add_argument("--log-dir", type=str, default=None, help="Log directory path")
+    parser.add_argument("--gui", action="store_true", help="Open folder selection dialogs")
+
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--ollama-url", type=str, default=None)
     parser.add_argument("--workers-extract", type=int, default=None)
@@ -51,12 +58,65 @@ def _build_cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "mode": args.mode,
         "source_root": args.source_root,
         "output_root": args.output_root,
+        "manifest_dir": args.manifest_dir,
+        "state_file": args.state_file,
+        "log_dir": args.log_dir,
         "model": args.model,
         "ollama_url": args.ollama_url,
         "workers_extract": args.workers_extract,
         "workers_llm": args.workers_llm,
         "dry_run": dry_run,
     }
+
+
+def _is_apply_like_mode(mode: str) -> bool:
+    return mode in {"apply-copy", "apply-move", "rename-in-place", "folder-rename-only"}
+
+
+def _build_gui_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
+    if args.mode == "analyze":
+        src = select_directory("Select SOURCE folder (read-only in ANALYZE mode)")
+        if src is None:
+            console.print("[yellow]No source folder selected; exiting.[/yellow]")
+            return None
+
+        suggested_out = src.parent / f"{src.name}_out"
+        out = select_directory(
+            "Select OUTPUT folder for manifests/logs (Cancel to use '<source>_out').",
+            initialdir=str(suggested_out.parent),
+        )
+        if out is None:
+            out = suggested_out
+
+        return {
+            "source_root": str(src),
+            "output_root": str(out),
+        }
+
+    if _is_apply_like_mode(args.mode):
+        src = select_directory("Select TARGET folder (files may be reorganized in apply-like modes)")
+        if src is None:
+            console.print("[yellow]No target folder selected; exiting.[/yellow]")
+            return None
+
+        suggested_out = src.parent / f"{src.name}_out"
+        out = select_directory(
+            "Select OUTPUT/BACKUP folder (Cancel to use '<target>_out').",
+            initialdir=str(suggested_out.parent),
+        )
+        if out is None:
+            out = suggested_out
+
+        return {
+            "source_root": str(src),
+            "output_root": str(out),
+        }
+
+    src = select_directory("Select source folder")
+    if src is None:
+        console.print("[yellow]No source folder selected; exiting.[/yellow]")
+        return None
+    return {"source_root": str(src)}
 
 
 def _use_cache(record: FileRecord, state: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
@@ -82,8 +142,15 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
+    overrides = _build_cli_overrides(args)
+    if args.gui:
+        gui_overrides = _build_gui_overrides(args)
+        if gui_overrides is None:
+            return 1
+        overrides.update(gui_overrides)
+
     try:
-        cfg = load_config(Path(args.config) if args.config else None, _build_cli_overrides(args))
+        cfg = load_config(Path(args.config) if args.config else None, overrides)
     except ConfigError as exc:
         console.print(f"[red]Config error:[/red] {exc}")
         return 2
@@ -93,7 +160,7 @@ def main() -> int:
         return 2
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    setup_logging(cfg.manifest_dir / f"run_{run_id}.log")
+    setup_logging(cfg.log_dir / f"run_{run_id}.log")
 
     if cfg.mode in {"analyze", "folder-rename-only"} and args.no_dry_run:
         console.print("[yellow]Warning:[/yellow] no-dry-run requested in a non-destructive mode")
@@ -101,7 +168,7 @@ def main() -> int:
     state = load_state(cfg.state_file)
     stats = RunStats()
 
-    logging.info("Starting mode=%s source=%s", cfg.mode, cfg.source_root)
+    logging.info("Starting mode=%s source=%s output=%s", cfg.mode, cfg.source_root, cfg.output_root)
 
     records = discover_files(cfg)
     stats.total_scanned = len(records)

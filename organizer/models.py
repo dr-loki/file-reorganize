@@ -46,6 +46,27 @@ class Config:
     skip_existing_in_output: bool = True
     state_file: Path | None = None
     manifest_dir: Path | None = None
+    log_dir: Path | None = None
+
+    def finalize(self) -> None:
+        """Normalize all path fields and derive optional paths."""
+        self.source_root = Path(self.source_root).expanduser().resolve()
+
+        if self.output_root is None:
+            self.output_root = self.source_root.parent / f"{self.source_root.name}_out"
+        self.output_root = Path(self.output_root).expanduser().resolve()
+
+        if self.manifest_dir is None:
+            self.manifest_dir = self.output_root / ".organizer_manifests"
+        self.manifest_dir = Path(self.manifest_dir).expanduser().resolve()
+
+        if self.state_file is None:
+            self.state_file = self.manifest_dir / "state.json"
+        self.state_file = Path(self.state_file).expanduser().resolve()
+
+        if self.log_dir is None:
+            self.log_dir = self.manifest_dir
+        self.log_dir = Path(self.log_dir).expanduser().resolve()
 
 
 @dataclass(slots=True)

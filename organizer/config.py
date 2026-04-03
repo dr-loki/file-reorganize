@@ -73,8 +73,8 @@ def load_config(config_path: Path | None, cli_overrides: dict[str, Any]) -> Conf
         raise ConfigError("source_root is required")
 
     config = Config(
-        source_root=source_root.resolve(),
-        output_root=output_root.resolve() if output_root else None,
+        source_root=source_root,
+        output_root=output_root,
         mode=_mode_from_str(str(mode_raw)),
         ollama_url=str(merged.get("ollama_url", "http://localhost:11434")),
         model=str(merged.get("model", "llama3.2:3b")),
@@ -103,17 +103,12 @@ def load_config(config_path: Path | None, cli_overrides: dict[str, Any]) -> Conf
         skip_existing_in_output=bool(merged.get("skip_existing_in_output", True)),
         state_file=_as_path(merged.get("state_file")),
         manifest_dir=_as_path(merged.get("manifest_dir")),
+        log_dir=_as_path(merged.get("log_dir")),
     )
+
+    config.finalize()
 
     if not config.source_root.exists() or not config.source_root.is_dir():
         raise ConfigError(f"source_root does not exist or is not a directory: {config.source_root}")
-
-    if config.mode in {"apply-copy", "apply-move"} and config.output_root is None:
-        raise ConfigError("output_root is required for apply-copy/apply-move")
-
-    if config.state_file is None:
-        config.state_file = config.source_root / ".organizer_state.json"
-    if config.manifest_dir is None:
-        config.manifest_dir = config.source_root / ".organizer_manifests"
 
     return config

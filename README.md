@@ -1,235 +1,131 @@
-<<<<<<< HEAD
 # Disk ReOrganizer
 
-Production-grade Python 3.11+ CLI that reorganizes large Linux directory trees using local Ollama classification, deterministic planning, and safe apply modes.
+Disk ReOrganizer is a Python 3.11+ CLI that reorganizes files using local Ollama classification, deterministic planning, and safe execution modes.
 
-## Architecture Overview
+## What Changed In This Refactor
 
-The application is organized into staged modules:
+- All runtime paths are now centralized in configuration.
+- `source_root` and `output_root` are the primary path inputs.
+- Optional path fields are derived automatically when omitted:
+  - `manifest_dir` defaults to `<output_root>/.organizer_manifests`
+  - `state_file` defaults to `<manifest_dir>/state.json`
+  - `log_dir` defaults to `<manifest_dir>`
+- Optional GUI flow (`--gui`) allows folder selection dialogs.
+- GUI is mode-aware and prompts differently for analyze vs apply-like modes.
 
-- `organizer/scanner.py`: recursive discovery with extension and path filtering.
-- `organizer/extractors.py`: bounded parallel extraction for PDF, DOCX, TXT, MD, CSV (with optional OCR fallback).
-- `organizer/classify.py`: local Ollama calls with retry/backoff and strict JSON output sanitization.
-- `organizer/planner.py`: deterministic path planning, numbering, duplicate detection, and collision handling.
-- `organizer/executor.py`: safe copy/move/rename execution with dry-run defaults and no overwrite behavior.
-- `organizer/manifest.py`: CSV/JSON manifest and summary generation.
-- `organizer/__main__.py`: CLI orchestration, resumable state cache, and mode execution.
+## Installation
 
-## Safety Defaults
+### Windows (PowerShell)
 
-- Dry-run is enabled by default.
-- `apply-copy` is the recommended first real run.
-- No silent overwrite.
-- No destructive delete logic.
-- `rename-in-place` requires `--yes-i-understand`.
-- Manifest and logs are always generated under `manifest_dir`.
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
 
-## Install
-
-Linux-first setup:
+### Linux/macOS (bash)
 
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull llama3.2:3b
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Optional OCR dependencies:
+If you use OCR features, install optional OCR dependencies and system Tesseract.
+
+## Quick Start (Recommended): GUI Mode
+
+### Analyze (non-destructive)
 
 ```bash
-pip install "Pillow>=10.0.0" "pytesseract>=0.3.10"
-# Also install system tesseract package on Linux, e.g.:
-# sudo apt-get install -y tesseract-ocr
+python -m organizer analyze --gui
 ```
 
-## Run Commands
+Prompts:
 
-Use one-command execution through module entrypoint:
+1. Select SOURCE folder (read-only scan in analyze mode).
+2. Select OUTPUT folder for manifests/logs (or cancel to use `<source>_out`).
+
+### Apply-like modes
 
 ```bash
-python3 -m organizer analyze /source/path --config sample_config.yaml
-python3 -m organizer apply-copy /source/path /organized/output --config sample_config.yaml
-python3 -m organizer apply-move /source/path /organized/output --config sample_config.yaml
-python3 -m organizer rename-in-place /source/path --yes-i-understand --config sample_config.yaml
-python3 -m organizer folder-rename-only /source/path --config sample_config.yaml
+python -m organizer apply-copy --gui
+python -m organizer apply-move --gui
+python -m organizer rename-in-place --gui --yes-i-understand
+python -m organizer folder-rename-only --gui
 ```
 
-### Notes
+Prompts:
 
-- `--no-dry-run` enables real writes for apply/rename modes.
-- `--model`, `--ollama-url`, `--workers-extract`, and `--workers-llm` can override config file values.
+1. Select TARGET folder (mode-dependent changes may occur).
+2. Select OUTPUT/BACKUP folder (or cancel to use `<target>_out`).
 
-## Recommended First Dry-Run Workflow
+## Configuration File (YAML)
+
+Example:
+
+```yaml
+source_root: C:/data/messy_source
+output_root: C:/data/messy_source_out
+mode: analyze
+
+# Optional overrides:
+# manifest_dir: C:/data/messy_source_out/.organizer_manifests
+# state_file: C:/data/messy_source_out/.organizer_manifests/state.json
+# log_dir: C:/data/messy_source_out/.organizer_manifests
+```
+
+Run with config:
 
 ```bash
-# 1) Configure paths and model
-cp sample_config.yaml my_config.yaml
-
-# 2) Analyze only (safe)
-python3 -m organizer analyze /data/messy_drive --config my_config.yaml
-
-# 3) Review manifests
-ls -lah /data/messy_drive/.organizer_manifests
-
-# 4) First real run: copy mode (preserves source)
-python3 -m organizer apply-copy /data/messy_drive /data/organized_copy --config my_config.yaml --no-dry-run
-
-# 5) Optional advanced run after review
-python3 -m organizer apply-move /data/messy_drive /data/organized_final --config my_config.yaml --no-dry-run
+python -m organizer analyze --config sample_config.yaml
 ```
 
-## Manifest Fields
+## CLI Overrides
 
-Each action entry includes:
+You can override YAML values directly:
 
-- source path
-- relative source path
-- file type
-- extracted snippet
-- descriptor
-- date relevance
-- normalized date
-- folder path
-- confidence
-- final proposed filename
-- final destination path
-- action type
-- status
-- error message
+```bash
+python -m organizer analyze \
+  --source-root "C:/data/messy_source" \
+  --output-root "C:/data/messy_source_out"
+```
 
-## Project Layout
+Supported path flags:
 
-- `pyproject.toml`
-- `requirements.txt`
-- `sample_config.yaml`
-- `organizer/__init__.py`
-- `organizer/__main__.py`
-- `organizer/config.py`
-- `organizer/models.py`
-- `organizer/scanner.py`
-- `organizer/extractors.py`
-- `organizer/classify.py`
-- `organizer/planner.py`
-- `organizer/executor.py`
-- `organizer/manifest.py`
-- `organizer/utils.py`
-=======
-# Disk ReOrganizer
+- `--source-root`
+- `--output-root`
+- `--manifest-dir`
+- `--state-file`
+- `--log-dir`
 
-Production-grade Python 3.11+ CLI that reorganizes large Linux directory trees using local Ollama classification, deterministic planning, and safe apply modes.
+## Modes
 
-## Architecture Overview
+| Mode | Source behavior | Output behavior |
+| :-- | :-- | :-- |
+| analyze | Read-only scan | Receives manifests/logs/state |
+| apply-copy | Source unchanged; files copied by plan | Receives organized file tree + manifests/logs/state |
+| apply-move | Files moved by plan | Receives organized file tree + manifests/logs/state |
+| rename-in-place | Files renamed/moved in source tree | Receives manifests/logs/state |
+| folder-rename-only | Folder renames in source tree | Receives manifests/logs/state |
 
-The application is organized into staged modules:
-
-- `organizer/scanner.py`: recursive discovery with extension and path filtering.
-- `organizer/extractors.py`: bounded parallel extraction for PDF, DOCX, TXT, MD, CSV (with optional OCR fallback).
-- `organizer/classify.py`: local Ollama calls with retry/backoff and strict JSON output sanitization.
-- `organizer/planner.py`: deterministic path planning, numbering, duplicate detection, and collision handling.
-- `organizer/executor.py`: safe copy/move/rename execution with dry-run defaults and no overwrite behavior.
-- `organizer/manifest.py`: CSV/JSON manifest and summary generation.
-- `organizer/__main__.py`: CLI orchestration, resumable state cache, and mode execution.
-
-## Safety Defaults
+## Safety Notes
 
 - Dry-run is enabled by default.
-- `apply-copy` is the recommended first real run.
-- No silent overwrite.
-- No destructive delete logic.
+- Use `--no-dry-run` for real writes.
 - `rename-in-place` requires `--yes-i-understand`.
-- Manifest and logs are always generated under `manifest_dir`.
-
-## Install
-
-Linux-first setup:
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull llama3.2:3b
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Optional OCR dependencies:
-
-```bash
-pip install "Pillow>=10.0.0" "pytesseract>=0.3.10"
-# Also install system tesseract package on Linux, e.g.:
-# sudo apt-get install -y tesseract-ocr
-```
-
-## Run Commands
-
-Use one-command execution through module entrypoint:
-
-```bash
-python3 -m organizer analyze /source/path --config sample_config.yaml
-python3 -m organizer apply-copy /source/path /organized/output --config sample_config.yaml
-python3 -m organizer apply-move /source/path /organized/output --config sample_config.yaml
-python3 -m organizer rename-in-place /source/path --yes-i-understand --config sample_config.yaml
-python3 -m organizer folder-rename-only /source/path --config sample_config.yaml
-```
-
-### Notes
-
-- `--no-dry-run` enables real writes for apply/rename modes.
-- `--model`, `--ollama-url`, `--workers-extract`, and `--workers-llm` can override config file values.
-
-## Recommended First Dry-Run Workflow
-
-```bash
-# 1) Configure paths and model
-cp sample_config.yaml my_config.yaml
-
-# 2) Analyze only (safe)
-python3 -m organizer analyze /data/messy_drive --config my_config.yaml
-
-# 3) Review manifests
-ls -lah /data/messy_drive/.organizer_manifests
-
-# 4) First real run: copy mode (preserves source)
-python3 -m organizer apply-copy /data/messy_drive /data/organized_copy --config my_config.yaml --no-dry-run
-
-# 5) Optional advanced run after review
-python3 -m organizer apply-move /data/messy_drive /data/organized_final --config my_config.yaml --no-dry-run
-```
-
-## Manifest Fields
-
-Each action entry includes:
-
-- source path
-- relative source path
-- file type
-- extracted snippet
-- descriptor
-- date relevance
-- normalized date
-- folder path
-- confidence
-- final proposed filename
-- final destination path
-- action type
-- status
-- error message
+- Manifests/logs/state are always written under configured or derived config paths.
 
 ## Project Layout
 
-- `pyproject.toml`
-- `requirements.txt`
-- `sample_config.yaml`
-- `organizer/__init__.py`
-- `organizer/__main__.py`
-- `organizer/config.py`
-- `organizer/models.py`
-- `organizer/scanner.py`
-- `organizer/extractors.py`
-- `organizer/classify.py`
-- `organizer/planner.py`
-- `organizer/executor.py`
-- `organizer/manifest.py`
-- `organizer/utils.py`
->>>>>>> fb11a3aff437569db5be90222a529837814e7c73
+- `organizer/__main__.py` CLI entrypoint and orchestration
+- `organizer/config.py` YAML + override loading
+- `organizer/models.py` config dataclass and path finalization
+- `organizer/gui_select.py` folder dialog helper
+- `organizer/scanner.py` file discovery
+- `organizer/extractors.py` text extraction
+- `organizer/classify.py` LLM classification
+- `organizer/planner.py` deterministic action planning
+- `organizer/executor.py` apply operations
+- `organizer/manifest.py` output manifests
+- `organizer/utils.py` helpers, logging, state I/O
