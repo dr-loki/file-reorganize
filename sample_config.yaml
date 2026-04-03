@@ -1,5 +1,5 @@
-source_root: /path/to/source
-output_root: /path/to/output
+source_root: C:/data/messy_source
+output_root: C:/data/messy_source_out
 mode: analyze
 ollama_url: http://localhost:11434
 model: llama3.2:3b
@@ -47,5 +47,7 @@ review_bucket: unclear/needs_review
 skip_duplicates: true
 detect_duplicates: true
 skip_existing_in_output: true
-state_file: /path/to/source/.organizer_state.json
-manifest_dir: /path/to/source/.organizer_manifests
+# Optional: if omitted they are derived from output_root
+# manifest_dir: C:/data/messy_source_out/.organizer_manifests
+# state_file: C:/data/messy_source_out/.organizer_manifests/state.json
+# log_dir: C:/data/messy_source_out/.organizer_manifests
